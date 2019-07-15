@@ -12,6 +12,10 @@ import math
 import gym
 from gym import logger, wrappers
 
+import wandb
+
+wandb.init()
+
 
 # A helper function to randomly initialize weights and biases
 # for a dense neural network layer
@@ -30,7 +34,6 @@ def init_network_params(sizes, key):
 
 layer_sizes = [5, 8, 16, 8, 5]
 param_scale = 0.1
-step_size = 0.0001
 num_epochs = 10
 batch_size = 128
 n_targets = 10
@@ -49,7 +52,7 @@ def predict(params, state):
 
     final_w, final_b = params[-1]
     logits, action = np.split(np.dot(final_w, activations), [-1])
-    return logits, np.amin(relu(action).astype(np.int32))
+    return logits, onp.asarray(relu(action).astype(np.int32))[0]
 
 
 # Make a batched version of the `predict` function
@@ -61,16 +64,24 @@ def loss(params, x, y):
     return mse
 
 
-@jit
+# Return a vaue as the last from a jit function and we'll log it
+# Make a @jit-log that logs returned values
+# @jit
 def update(params, x, y, reward):
-
-    step_size = (10 + reward) / 10
-
+    step_size = (10 + reward) / 10000
     grads = grad(loss)(params, x, y)
-    return [
-        (w - step_size * dw, b - step_size * db)
-        for (w, b), (dw, db) in zip(params, grads)
-    ]
+    ws, bs = zip(*grads)
+
+    return (
+        [
+            (w - step_size * dw, b - step_size * db)
+            for (w, b), (dw, db) in zip(params, grads)
+        ],
+        {
+            "weights": np.concatenate([np.ravel(layer) for layer in ws]),
+            "biases": np.concatenate([np.ravel(layer) for layer in bs]),
+        },
+    )
 
 
 class RandomAgent(object):
@@ -83,15 +94,19 @@ class RandomAgent(object):
     def act(self, observation, reward, done):
         # Update model, besdies first go
         if hasattr(self, "predicted_state"):
-            update(self.params, self.predicted_state, observation, reward)
+            params, logs = update(
+                self.params, self.predicted_state, observation, reward
+            )
+            self.params = params
+            wandb.log(logs)
 
         input = np.concatenate((observation, np.array([reward])))
         predicted_observation, action = predict(self.params, input)
 
         self.predicted_state = predicted_observation
         self.action_taken = action
-        return self.action_space.sample()
-        # return self.action_taken
+        # return self.action_space.sample()
+        return self.action_taken
 
 
 if __name__ == "__main__":
@@ -116,11 +131,13 @@ if __name__ == "__main__":
     env.seed(0)
     agent = RandomAgent(env.action_space)
 
-    episode_count = 100
+    episode_count = 10000000
     reward = 0
     done = False
 
+    print("running")
     for i in range(episode_count):
+        print("II", i)
         ob = env.reset()
         while True:
             action = agent.act(ob, reward, done)
