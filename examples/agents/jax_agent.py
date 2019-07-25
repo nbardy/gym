@@ -7,7 +7,6 @@ import jax.numpy as np
 from jax import grad, jit, vmap
 from jax import random
 
-import math
 
 import gym
 from gym import logger, wrappers
@@ -32,11 +31,9 @@ def init_network_params(sizes, key):
     ]
 
 
-layer_sizes = [5, 8, 16, 8, 5]
+layer_sizes = [4, 8, 16, 5]
+layer_sizes = [4, 8, 16, 100, 100, 6, 5]
 param_scale = 0.1
-num_epochs = 10
-batch_size = 128
-n_targets = 10
 
 
 def relu(x):
@@ -44,42 +41,58 @@ def relu(x):
 
 
 def predict(params, state):
-    # per-example predictions
-    activations = state
+    """
+    Predict the next state give the args:
+        params: network parameters
+        state:  current state
+
+    Returns:
+        predicted_state: next state prediction
+        action: action to take
+    """
+
+    # Date is a mutable variable that will hold the intermediatery states between layers
+    data = state
     for w, b in params[:-1]:
-        outputs = np.dot(w, activations) + b
-        activations = relu(outputs)
+        data = np.add(np.dot(w, data), b)
+        data = relu(data)
 
     final_w, final_b = params[-1]
-    logits, action = np.split(np.dot(final_w, activations), [-1])
-    return logits, onp.asarray(relu(action).astype(np.int32))[0]
-
-
-# Make a batched version of the `predict` function
-# batched_predict = vmap(predict, in_axes=(None, 0))
+    predicted_state, action = np.split(relu(np.dot(final_w, data)), [-1])
+    return predicted_state, action
 
 
 def loss(params, x, y):
-    mse = (np.square(x - y)).mean()
+    predicted_state, _ = predict(params, x)
+    mse = (np.square(predicted_state - y)).sum()
     return mse
 
 
 # Return a vaue as the last from a jit function and we'll log it
 # Make a @jit-log that logs returned values
-# @jit
-def update(params, x, y, reward):
-    step_size = (10 + reward) / 10000
+@jit
+def update(params, x, y, reward, step):
+    step_size = (10 + reward) / 10000 * (1 / step * step)
+    predicted_observation, action = predict(params, x)
     grads = grad(loss)(params, x, y)
-    ws, bs = zip(*grads)
+    loss_v = loss(params, x, y)
+    dws, dbs = zip(*grads)
+    ws, bs = zip(*params)
 
     return (
         [
             (w - step_size * dw, b - step_size * db)
             for (w, b), (dw, db) in zip(params, grads)
         ],
+        predicted_observation,
+        action,
         {
             "weights": np.concatenate([np.ravel(layer) for layer in ws]),
             "biases": np.concatenate([np.ravel(layer) for layer in bs]),
+            "dweights": np.concatenate([np.ravel(layer) for layer in dws]),
+            "dbiases": np.concatenate([np.ravel(layer) for layer in dbs]),
+            "step_size": step_size,
+            "loss": loss_v,
         },
     )
 
@@ -90,21 +103,33 @@ class RandomAgent(object):
     def __init__(self, action_space):
         self.action_space = action_space
         self.params = init_network_params(layer_sizes, random.PRNGKey(0))
+        self.step_n = 1
 
     def act(self, observation, reward, done):
-        # Update model, besdies first go
-        if hasattr(self, "predicted_state"):
-            params, logs = update(
-                self.params, self.predicted_state, observation, reward
+        logs = {}
+        params = self.params
+        # First step predict and take random action
+        if self.step_n == 1:
+            self.predicted_state, _ = predict(params, observation)
+            self.action_taken = self.action_space.sample()
+        else:
+            # Update model
+            params, predicted_observation, action, logs = update(
+                params, self.predicted_state, observation, reward, self.step_n
             )
+            action = float(action[0])
+            logs["action"] = action
             self.params = params
-            wandb.log(logs)
 
-        input = np.concatenate((observation, np.array([reward])))
-        predicted_observation, action = predict(self.params, input)
+            self.predicted_state = predicted_observation
+            self.action_taken = round(action)
 
-        self.predicted_state = predicted_observation
-        self.action_taken = action
+        logs["action_taken"] = self.action_taken
+        wandb.log(logs)
+
+        # Increment step counte
+        self.step_n = self.step_n + 1
+
         # return self.action_space.sample()
         return self.action_taken
 
@@ -131,13 +156,11 @@ if __name__ == "__main__":
     env.seed(0)
     agent = RandomAgent(env.action_space)
 
-    episode_count = 10000000
+    episode_count = 10
     reward = 0
     done = False
 
-    print("running")
     for i in range(episode_count):
-        print("II", i)
         ob = env.reset()
         while True:
             action = agent.act(ob, reward, done)
