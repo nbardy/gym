@@ -6,6 +6,8 @@ from jax.scipy.special import logsumexp
 import jax.numpy as np
 from jax import grad, jit, vmap
 from jax import random
+import math
+import pandas
 
 
 import gym
@@ -31,13 +33,21 @@ def init_network_params(sizes, key):
     ]
 
 
-layer_sizes = [4, 8, 16, 5]
-layer_sizes = [4, 8, 16, 100, 100, 6, 5]
+layer_sizes = [4, 5, 5]
+# layer_sizes = [4, 8, 16, 100, 100, 6, 5]
 param_scale = 0.1
 
 
+def clamp(x, bounds):
+    [low, high] = bounds
+    return np.minimum(np.maximum(low, x), high)
+
+
 def relu(x):
-    return np.minimum(np.maximum(0, x), 1)
+    res = np.minimum(np.maximum(0, x), 1)
+    # print("x", x)
+    # print("res", res)
+    return res
 
 
 def predict(params, state):
@@ -53,6 +63,7 @@ def predict(params, state):
 
     # Date is a mutable variable that will hold the intermediatery states between layers
     data = state
+
     for w, b in params[:-1]:
         data = np.add(np.dot(w, data), b)
         data = relu(data)
@@ -71,8 +82,7 @@ def loss(params, x, y):
 # Return a vaue as the last from a jit function and we'll log it
 # Make a @jit-log that logs returned values
 @jit
-def update(params, x, y, reward, step):
-    step_size = (10 + reward) / 10000 * (1 / step * step)
+def update(params, x, y, step_size, step):
     predicted_observation, action = predict(params, x)
     grads = grad(loss)(params, x, y)
     loss_v = loss(params, x, y)
@@ -96,6 +106,19 @@ def update(params, x, y, reward, step):
         },
     )
 
+    # TODO: Make this generic for all states
+
+
+def regularize(state):
+    return np.array(
+        [
+            (state[0] + 2.4) / 4.8,
+            (state[1] + 100) / 200,
+            (state[2] + 42) / 84,
+            (state[3] + 100) / 200,
+        ]
+    )
+
 
 class RandomAgent(object):
     """The world's simplest agent!"""
@@ -103,9 +126,16 @@ class RandomAgent(object):
     def __init__(self, action_space):
         self.action_space = action_space
         self.params = init_network_params(layer_sizes, random.PRNGKey(0))
+        self.parameter_history = [self.params]
         self.step_n = 1
 
+    def param_history(self):
+        return pd.DataFrame(
+            data=self.parameter_history, columns=[i for i in range(0, len(self.params))]
+        )
+
     def act(self, observation, reward, done):
+        observation = regularize(observation)
         logs = {}
         params = self.params
         # First step predict and take random action
@@ -113,18 +143,28 @@ class RandomAgent(object):
             self.predicted_state, _ = predict(params, observation)
             self.action_taken = self.action_space.sample()
         else:
+            # Impact of the update is determined by learning_rate, step_size, reward
+            #    * learning_rate is a fixed hyper parameter
+            #    * exponential on reward
+            #    * root on step_n
+            learning_rate = 0.001
+            magnitude = 1 / math.sqrt(self.step_n) * learning_rate * reward * reward
+
             # Update model
             params, predicted_observation, action, logs = update(
-                params, self.predicted_state, observation, reward, self.step_n
+                params, self.predicted_state, observation, magnitude, self.step_n
             )
             action = float(action[0])
             logs["action"] = action
             self.params = params
 
+            self.parameter_history.append(params)
+
             self.predicted_state = predicted_observation
             self.action_taken = round(action)
 
         logs["action_taken"] = self.action_taken
+        logs["reward"] = reward
         wandb.log(logs)
 
         # Increment step counte
@@ -157,14 +197,15 @@ if __name__ == "__main__":
     agent = RandomAgent(env.action_space)
 
     episode_count = 10
-    reward = 0
     done = False
 
     for i in range(episode_count):
+        total_reward = 0
         ob = env.reset()
         while True:
-            action = agent.act(ob, reward, done)
+            action = agent.act(ob, total_reward, done)
             ob, reward, done, _ = env.step(action)
+            total_reward += reward
             if done:
                 break
             # Note there's no env.render() here. But the environment still can open
@@ -172,5 +213,6 @@ if __name__ == "__main__":
             # env.render('rgb_array') to record video. Video is not recorded every
             # episode, see capped_cubic_video_schedule for details.
 
+    wandb.summary.update({"parameter_history": agent.parameter_history})
     # Close the env and write monitor result info to disk
     env.close()
