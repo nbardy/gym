@@ -33,9 +33,9 @@ def init_network_params(sizes, key):
     ]
 
 
-layer_sizes = [4, 5, 5]
+layer_sizes = [4, 100, 20, 10, 4]
 # layer_sizes = [4, 8, 16, 100, 100, 6, 5]
-param_scale = 0.1
+# param_scale = 0.1
 
 
 def clamp(x, bounds):
@@ -43,14 +43,20 @@ def clamp(x, bounds):
     return np.minimum(np.maximum(low, x), high)
 
 
+# Clamps x [-1,1]
 def relu(x):
-    res = np.minimum(np.maximum(0, x), 1)
+    res = np.minimum(np.maximum(-1, x), 1)
     # print("x", x)
     # print("res", res)
     return res
 
 
-def predict(params, state):
+def derive_action(x):
+    return 0.0
+    # sin(x)
+
+
+def predict(params, state, action_size=2, action_layer=[3, 4]):
     """
     Predict the next state give the args:
         params: network parameters
@@ -64,13 +70,24 @@ def predict(params, state):
     # Date is a mutable variable that will hold the intermediatery states between layers
     data = state
 
+    i = 0
     for w, b in params[:-1]:
         data = np.add(np.dot(w, data), b)
-        data = relu(data)
+        i += 1
 
     final_w, final_b = params[-1]
-    predicted_state, action = np.split(relu(np.dot(final_w, data)), [-1])
+    predicted_state = np.tanh(np.dot(final_w, data))
+
+    # TODO: Make this come out of a noise function
+    action = 0.0
+
     return predicted_state, action
+
+
+# TODO: Problem: They last set of weights that feed directly to the action will
+#                not update since there is no backprop. I need to make them sufficiently
+#                noisey and random.
+#                so that small rest of the network produce lots of noise there
 
 
 def loss(params, x, y):
@@ -112,10 +129,10 @@ def update(params, x, y, step_size, step):
 def regularize(state):
     return np.array(
         [
-            (state[0] + 2.4) / 4.8,
-            (state[1] + 100) / 200,
-            (state[2] + 42) / 84,
-            (state[3] + 100) / 200,
+            state[0] / 2.4,
+            relu(state[1]) / 200,  # Use relu to trim outliers
+            state[2] / 84,
+            relu(state[3] / 300),  # Use relu to trim outliers
         ]
     )
 
@@ -129,8 +146,8 @@ class RandomAgent(object):
         self.parameter_history = [self.params]
         self.step_n = 1
 
-    def param_history(self):
-        return pd.DataFrame(
+    def parameter_history_dataframe(self):
+        return pandas.DataFrame(
             data=self.parameter_history, columns=[i for i in range(0, len(self.params))]
         )
 
@@ -154,8 +171,7 @@ class RandomAgent(object):
             params, predicted_observation, action, logs = update(
                 params, self.predicted_state, observation, magnitude, self.step_n
             )
-            action = float(action[0])
-            logs["action"] = action
+
             self.params = params
 
             self.parameter_history.append(params)
@@ -165,6 +181,7 @@ class RandomAgent(object):
 
         logs["action_taken"] = self.action_taken
         logs["reward"] = reward
+        logs["action"] = self.action_taken
         wandb.log(logs)
 
         # Increment step counte
@@ -213,6 +230,6 @@ if __name__ == "__main__":
             # env.render('rgb_array') to record video. Video is not recorded every
             # episode, see capped_cubic_video_schedule for details.
 
-    wandb.summary.update({"parameter_history": agent.parameter_history})
+    wandb.summary.update({"parameter_history": agent.parameter_history_dataframe()})
     # Close the env and write monitor result info to disk
     env.close()
