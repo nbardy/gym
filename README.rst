@@ -1,3 +1,10 @@
+Nicholas Fork of OpenAI Gym
+----------------------------
+
+This fork contains my explorations in RL. Intial work is a model written in jax.
+
+
+
 **Status:** Maintenance (expect bug fixes and minor updates)
 
 OpenAI Gym

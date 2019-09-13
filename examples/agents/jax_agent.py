@@ -34,8 +34,9 @@ def init_network_params(sizes, key):
 
 
 layer_sizes = [4, 100, 20, 10, 4]
-# layer_sizes = [4, 8, 16, 100, 100, 6, 5]
-# param_scale = 0.1
+
+# These are the layers to feed into the action generator
+action_generator = [1, 2]
 
 
 def clamp(x, bounds):
@@ -51,12 +52,7 @@ def relu(x):
     return res
 
 
-def derive_action(x):
-    return 0.0
-    # sin(x)
-
-
-def predict(params, state, action_size=2, action_layer=[3, 4]):
+def predict(params, state, action_field=None, action_size=2, action_layer=[2, 3]):
     """
     Predict the next state give the args:
         params: network parameters
@@ -71,9 +67,36 @@ def predict(params, state, action_size=2, action_layer=[3, 4]):
     data = state
 
     i = 0
+    action_data = np.array([])
     for w, b in params[:-1]:
         data = np.add(np.dot(w, data), b)
         i += 1
+        if action_field and i in action_layer:
+            action_data.append(data)
+
+    try:
+        sin_cut = wandb.config.sin_cut
+    except KeyError:
+        wandb.config.sin_cut = 0.001
+
+    if action_field:
+        assert len(action_field) == 2
+        for i in range(0, len(action_field or [])):
+            # All action_fields arrays must equal action_data size
+            assert len(action_field[i]) == len(action_data)
+
+        # action_field has two sets of parameters
+
+        # Fast GPU noise
+        # http://people.compute.dtu.dk/jerf/papers/abstracts/noise_abstract.pdf
+        action = np.round(
+            np.dot(
+                1 / np.dot(len(action_field)),
+                np.sin(np.dot(action_data, action_field[1])),
+            )
+        )
+    else:
+        action = None
 
     final_w, final_b = params[-1]
     predicted_state = np.tanh(np.dot(final_w, data))
@@ -90,6 +113,7 @@ def predict(params, state, action_size=2, action_layer=[3, 4]):
 #                so that small rest of the network produce lots of noise there
 
 
+@vmap
 def loss(params, x, y):
     predicted_state, _ = predict(params, x)
     mse = (np.square(predicted_state - y)).sum()
@@ -99,8 +123,9 @@ def loss(params, x, y):
 # Return a vaue as the last from a jit function and we'll log it
 # Make a @jit-log that logs returned values
 @jit
-def update(params, x, y, step_size, step):
-    predicted_observation, action = predict(params, x)
+def update(params, x, y, step_size, step, action_field=None):
+    predicted_observation = predict(params, x, action_field=action_field)
+    # todo: make the ones a random set
     grads = grad(loss)(params, x, y)
     loss_v = loss(params, x, y)
     dws, dbs = zip(*grads)
@@ -143,18 +168,14 @@ class RandomAgent(object):
     def __init__(self, action_space):
         self.action_space = action_space
         self.params = init_network_params(layer_sizes, random.PRNGKey(0))
-        self.parameter_history = [self.params]
+        self.action_fields = action_fields = [np.ones([100 + 20]), np.ones([100 + 20])]
         self.step_n = 1
-
-    def parameter_history_dataframe(self):
-        return pandas.DataFrame(
-            data=self.parameter_history, columns=[i for i in range(0, len(self.params))]
-        )
 
     def act(self, observation, reward, done):
         observation = regularize(observation)
         logs = {}
         params = self.params
+
         # First step predict and take random action
         if self.step_n == 1:
             self.predicted_state, _ = predict(params, observation)
@@ -169,12 +190,15 @@ class RandomAgent(object):
 
             # Update model
             params, predicted_observation, action, logs = update(
-                params, self.predicted_state, observation, magnitude, self.step_n
+                params,
+                self.predicted_state,
+                observation,
+                magnitude,
+                self.step_n,
+                action_field=self.action_fields,
             )
 
             self.params = params
-
-            self.parameter_history.append(params)
 
             self.predicted_state = predicted_observation
             self.action_taken = round(action)
@@ -213,7 +237,7 @@ if __name__ == "__main__":
     env.seed(0)
     agent = RandomAgent(env.action_space)
 
-    episode_count = 10
+    episode_count = 1000
     done = False
 
     for i in range(episode_count):
@@ -230,6 +254,5 @@ if __name__ == "__main__":
             # env.render('rgb_array') to record video. Video is not recorded every
             # episode, see capped_cubic_video_schedule for details.
 
-    wandb.summary.update({"parameter_history": agent.parameter_history_dataframe()})
     # Close the env and write monitor result info to disk
     env.close()
